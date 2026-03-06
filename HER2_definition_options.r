@@ -5,10 +5,12 @@
 # ============================================================
 # Expected inputs (from previous QC + DESeq2 scripts):
 #   metadata_qc_passed.csv  – must contain: her2_clinical (HER2pos/HER2neg),
-#                             fraction_genome_altered, mutation_count
+#                             fraction_genome_altered, mutation_count,
+#                               ideally also patient_id for alignment 
+#                               (if not, rownames will be used),
+#                               and also ERBB2 copy number column, -2 to 2
 #   vst_her2_brca.rds       – VST SummarizedExperiment from DESeq2 script
-#   erbb2_gistic2.csv       – GISTIC2 scores, rows=samples, col="ERBB2"
-#                             values: -2 (deep del) / -1 / 0 / 1 / 2 (amp)
+
 # ============================================================
 
 library(DESeq2)
@@ -32,50 +34,35 @@ library(yardstick)      # tidy metrics (PR AUC)
 library(ComplexHeatmap)
 library(circlize)
 
-OUT_DIR <- "multimodal_plots";   dir.create(OUT_DIR, showWarnings = FALSE)
-RES_DIR <- "multimodal_results"; dir.create(RES_DIR, showWarnings = FALSE)
+out_dir <- "multimodal_plots";   dir.create(out_dir, showWarnings = FALSE)
+res_dir <- "multimodal_results"; dir.create(res_dir, showWarnings = FALSE)
 
-CV_FOLDS     <- 5
-RANDOM_SEED  <- 42
-ERBB2_ENS    <- "ENSG00000141736"   # adjust if IDs carry version suffix e.g. .13
-PALETTE      <- c("HER2pos" = "#E64B35", "HER2neg" = "#4DBBD5")
+cv_folds     <- 5
+random_seed  <- 42
+erbb2_gene   <- "ERBB2"
+palette      <- c("HER2pos" = "#E64B35", "HER2neg" = "#4DBBD5")
 
-save_plot <- function(p, fname, w = 8, h = 6, dpi = 150)
-  ggsave(file.path(OUT_DIR, fname), p, width = w, height = h, dpi = dpi, bg = "white")
-
+# Helper: save plots consistently
+save_plot <- function(p, fname, w=8, h=6, dpi=300) {
+  ggsave(file.path(plot_dir, fname), p, width=w, height=h, dpi=dpi,
+         bg = "white")
+  invisible(p)
+}
 # ═══════════════════════════════════════════════════════════
 # 1. LOAD & ALIGN DATA
 # ═══════════════════════════════════════════════════════════
 
 meta <- read.csv("metadata_qc_passed.csv", row.names = 1)
 vst  <- readRDS("vst_her2_brca.rds")            # RangedSummarizedExperiment
-cnv  <- read.csv("erbb2_gistic2.csv", row.names = 1)   # samples × genes
+meta_ids <- if ("patient_id" %in% colnames(meta)) meta$patient_id else rownames(meta)
+cnv <- meta$erbb2_copy_number %>%
+  setNames(meta_ids) %>%
+  as.data.frame()
+colnames(cnv) <- "erbb2_copy_number"
 
-# ── Harmonise TCGA barcodes to 15 chars ───────────────────
-trim_bc <- function(x, n = 15) substr(x, 1, n)
-
-rownames(meta)   <- trim_bc(rownames(meta))
-colnames(vst)    <- trim_bc(colnames(vst))
-rownames(cnv)    <- trim_bc(rownames(cnv))
-
-# Keep only samples with definitive IHC label
+# Keep only samples with definitive clinical FISH/IHC label
 meta <- meta[meta$her2_clinical %in% c("HER2pos", "HER2neg"), ]
 meta$her2_binary <- as.integer(meta$her2_clinical == "HER2pos")
-
-# Intersect across all layers
-common_samples <- Reduce(intersect, list(
-  rownames(meta),
-  colnames(vst),
-  rownames(cnv)
-))
-
-meta <- meta[common_samples, ]
-cnv  <- cnv[common_samples, , drop = FALSE]
-vst  <- vst[, common_samples]
-
-cat(sprintf("Common samples: %d  |  HER2+: %d  |  HER2-: %d\n",
-            length(common_samples),
-            sum(meta$her2_binary), sum(1 - meta$her2_binary)))
 
 # ═══════════════════════════════════════════════════════════
 # 2. BUILD FEATURE MATRICES
@@ -84,8 +71,8 @@ cat(sprintf("Common samples: %d  |  HER2+: %d  |  HER2-: %d\n",
 vst_mat <- assay(vst)   # genes × samples
 
 # ── 2A. RNA: ERBB2 mRNA ───────────────────────────────────
-erbb2_row <- rownames(vst_mat)[str_detect(rownames(vst_mat), ERBB2_ENS)]
-if (length(erbb2_row) == 0) stop("ERBB2 Ensembl ID not found in VST matrix")
+erbb2_row <- intersect(erbb2_gene, rownames(vst_mat))
+if (length(erbb2_row) == 0) stop("ERBB2 gene symbol not found in VST matrix")
 
 X_rna_erbb2 <- data.frame(
   ERBB2_mRNA = as.numeric(vst_mat[erbb2_row[1], ]),
@@ -94,23 +81,31 @@ X_rna_erbb2 <- data.frame(
 
 # ── 2B. RNA: Expanded — ERBB2 amplicon neighbours ─────────
 # GRB7, STARD3, MIEN1 are co-amplified on chr17q12; biologically meaningful
-amplicon_genes <- c("ENSG00000141736",  # ERBB2
-                    "ENSG00000177455",  # GRB7
-                    "ENSG00000132481",  # STARD3
-                    "ENSG00000132470")  # MIEN1
 
-amp_rows <- rownames(vst_mat)[
-  str_detect(rownames(vst_mat),
-             paste(amplicon_genes, collapse = "|"))
-]
+#The smallest common region of amplification found in all of the 
+#71 tumors analyzed was 78.61 Kbp, including six genes; 
+#STARD3, TCAP, PNMT, PERLD1, HER2, and C17orf37. 
+#Ninety percent (64/71) of the tumors shared a 255.74 Kbp 
+#amplification region consisting of ten genes; 
+#NEUROD2, PPP1R1B, STARD3, TCAP, PNMT, PERLD1, HER2, C17orf37, GRB7 and ZNFN1A3
+small_amplicon_genes <- c("ERBB2", "TCAP", "PNMT", "PERLD1", "C17orf37")
+larger_amplicon_genes <- c(small_amplicon_genes, c("NEUROD2", "PPP1R1B", 
+                                "STARD3", "TCAP", 
+                                "PNMT", "PERLD1",
+                            "ERBB2", "C17orf37", "GRB7", "ZNFN1A3"))    
+
+amp_rows <- intersect(larger_amplicon_genes, rownames(vst_mat))
+if (length(amp_rows) == 0) stop("None of the amplicon gene symbols were found in VST matrix")
 
 X_rna_amplicon <- t(vst_mat[amp_rows, ]) %>%
   as.data.frame() %>%
-  setNames(str_remove(colnames(.), "\\.\\d+$"))
+  setNames(colnames(.))
 
-# ── 2C. DNA: ERBB2 GISTIC2 score ─────────────────────────
-# GISTIC2 score: -2=deep deletion, -1=shallow del, 0=neutral, 1=gain, 2=amp
-cnv_col <- intersect(c("ERBB2", "ERBB2_gistic"), colnames(cnv))[1]
+#PICK UP HERE
+
+# ── 2C. DNA: ERBB2  score ─────────────────────────
+# CNV score: -2=deep deletion, -1=shallow del, 0=neutral, 1=gain, 2=amp
+cnv_col <- intersect(c("ERBB2", "ERBB2_CN"), colnames(cnv))[1]
 if (is.na(cnv_col)) stop("Cannot find ERBB2 column in CNV file")
 
 X_cnv <- data.frame(
@@ -152,10 +147,10 @@ y_factor <- factor(ifelse(y == 1, "HER2pos", "HER2neg"),
 #   M4: ERBB2 mRNA + CNV + genomic instability
 #   M5: ERBB2 amplicon genes + CNV + genomic instability (RF)
 
-set.seed(RANDOM_SEED)
+set.seed(random_seed)
 cv_ctrl <- trainControl(
   method          = "cv",
-  number          = CV_FOLDS,
+  number          = cv_folds,
   classProbs      = TRUE,
   summaryFunction = twoClassSummary,
   savePredictions = "final",
@@ -229,7 +224,7 @@ cv_metrics <- lapply(names(models), function(nm) {
 }) %>% bind_rows()
 
 print(cv_metrics)
-write.csv(cv_metrics, file.path(RES_DIR, "model_cv_metrics.csv"), row.names = FALSE)
+write.csv(cv_metrics, file.path(res_dir, "model_cv_metrics.csv"), row.names = FALSE)
 
 # ═══════════════════════════════════════════════════════════
 # 4. ROC CURVES — all models overlaid
@@ -253,7 +248,7 @@ p_roc <- ggplot(roc_list, aes(FPR, TPR, color = Model_AUC)) +
   geom_abline(linetype = "dashed", color = "grey60") +
   scale_color_brewer(palette = "Set1") +
   labs(title    = "ROC Curves — HER2+ Prediction by Modality",
-       subtitle  = paste0(CV_FOLDS, "-fold cross-validated"),
+       subtitle  = paste0(cv_folds, "-fold cross-validated"),
        x = "False Positive Rate", y = "True Positive Rate",
        color = NULL) +
   theme_bw(base_size = 12) +
@@ -302,7 +297,7 @@ p_pr <- ggplot(pr_list, aes(Recall, Precision, color = Model_AUC)) +
            size = 3, color = "grey40") +
   scale_color_brewer(palette = "Set1") +
   labs(title    = "Precision-Recall Curves — HER2+ Prediction",
-       subtitle  = paste0(CV_FOLDS, "-fold cross-validated"),
+       subtitle  = paste0(cv_folds, "-fold cross-validated"),
        x = "Recall", y = "Precision", color = NULL) +
   theme_bw(base_size = 12) +
   theme(legend.position = c(0.38, 0.25),
@@ -339,7 +334,7 @@ prep_glmnet <- function(X) {
 fit_lr_full <- function(X, label) {
   Xs <- prep_glmnet(X)
   cv_fit <- cv.glmnet(Xs, y, family = "binomial", alpha = 0.5,
-                      nfolds = CV_FOLDS, type.measure = "auc",
+                      nfolds = cv_folds, type.measure = "auc",
                       standardize = FALSE)
   coefs <- coef(cv_fit, s = "lambda.1se") %>%
     as.matrix() %>% as.data.frame() %>%
@@ -376,7 +371,7 @@ save_plot(p_coef, "04_logistic_coefficients.png", w = 8, h = 5)
 X_rf <- bind_cols(X_rna_amplicon, X_cnv, X_genomic) %>% as.data.frame()
 
 # Refit RF on full data for SHAP
-set.seed(RANDOM_SEED)
+set.seed(random_seed)
 rf_full <- randomForest(
   x = scale(X_rf),
   y = y_factor,
@@ -398,7 +393,7 @@ ks <- kernelshap(
 sv <- shapviz(ks)
 
 # SHAP beeswarm (summary plot)
-png(file.path(OUT_DIR, "05_SHAP_beeswarm.png"),
+png(file.path(out_dir, "05_SHAP_beeswarm.png"),
     width = 900, height = 700, res = 130)
 sv_importance(sv, kind = "beeswarm", max_display = 15,
               viridis_args = list(option = "C")) +
@@ -406,7 +401,7 @@ sv_importance(sv, kind = "beeswarm", max_display = 15,
 dev.off()
 
 # SHAP bar (mean |SHAP|)
-png(file.path(OUT_DIR, "06_SHAP_importance_bar.png"),
+png(file.path(out_dir, "06_SHAP_importance_bar.png"),
     width = 800, height = 600, res = 130)
 sv_importance(sv, kind = "bar", max_display = 15,
               fill = "#3C5488") +
@@ -535,7 +530,7 @@ p_violin <- ggplot(conc_df,
   geom_violin(alpha = 0.6, scale = "width") +
   geom_boxplot(width = 0.15, outlier.size = 0.5,
                position = position_dodge(0.9)) +
-  scale_fill_manual(values = PALETTE) +
+  scale_fill_manual(values = palette) +
   labs(title    = "ERBB2 mRNA by GISTIC2 Copy-Number Tier",
        subtitle  = "Filled by IHC clinical label",
        x = "GISTIC2 Score", y = "ERBB2 VST Expression",
@@ -578,7 +573,7 @@ p_fga <- ggplot(meta, aes(her2_clinical, fraction_genome_altered,
                            fill = her2_clinical)) +
   geom_violin(alpha = 0.6) +
   geom_boxplot(width = 0.12, outlier.size = 0.5) +
-  scale_fill_manual(values = PALETTE) +
+  scale_fill_manual(values = palette) +
   labs(title = "Fraction Genome Altered by HER2 Status",
        x = NULL, y = "FGA") +
   theme_bw(base_size = 12) + theme(legend.position = "none")
@@ -587,7 +582,7 @@ p_mut <- ggplot(meta, aes(her2_clinical, log10(mutation_count + 1),
                            fill = her2_clinical)) +
   geom_violin(alpha = 0.6) +
   geom_boxplot(width = 0.12, outlier.size = 0.5) +
-  scale_fill_manual(values = PALETTE) +
+  scale_fill_manual(values = palette) +
   labs(title = "Mutation Count (log10) by HER2 Status",
        x = NULL, y = "log10(mutation count + 1)") +
   theme_bw(base_size = 12) + theme(legend.position = "none")
@@ -602,9 +597,9 @@ cat("  Modality Comparison — Cross-validated AUC\n")
 cat("══════════════════════════════════════════\n")
 print(cv_metrics, digits = 3, row.names = FALSE)
 
-write.csv(conc_df,    file.path(RES_DIR, "sample_concordance_table.csv"))
-write.csv(imp_df,     file.path(RES_DIR, "RF_feature_importance.csv"), row.names = FALSE)
-write.csv(lr_combined$coefs, file.path(RES_DIR, "logistic_coefficients.csv"), row.names = FALSE)
+write.csv(conc_df,    file.path(res_dir, "sample_concordance_table.csv"))
+write.csv(imp_df,     file.path(res_dir, "RF_feature_importance.csv"), row.names = FALSE)
+write.csv(lr_combined$coefs, file.path(res_dir, "logistic_coefficients.csv"), row.names = FALSE)
 
-cat("\n✓ Plots saved to:", OUT_DIR, "\n")
-cat("✓ Tables saved to:", RES_DIR, "\n")
+cat("\n✓ Plots saved to:", out_dir, "\n")
+cat("✓ Tables saved to:", res_dir, "\n")
