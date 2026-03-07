@@ -116,9 +116,6 @@ p_coef <- ggplot(coef_df, aes(x = Model, y = estimate,
                                 color = term)) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
   geom_pointrange(position = position_dodge(0.5), size = 0.6) +
-  scale_color_manual(values = c("rna_z" = "#E64B35",
-                                 "dna_z" = "#4DBBD5",
-                                 "both_z" = "#7E6148")) +
   labs(title   = "Logistic Regression Coefficients (standardised)",
        x = NULL, y = "Log-odds (95% CI)", color = NULL) +
   theme_bw(base_size = 12)
@@ -137,97 +134,3 @@ results <- data.frame(
 write.csv(results, file.path(out_dir, "RNA_vs_DNA_results.csv"), row.names = FALSE)
 
 cat("\n✓ Done. Results in:", out_dir, "\n")
-
-
-#exploring
-# ============================================================
-# Diagnose the ROC jump: who are the "obvious" HER2+ cases?
-# ============================================================
-
-# ── 1. Find the jump threshold ─────────────────────────────
-# The jump corresponds to the predicted probability at which
-# TPR rises steeply before FPR has moved much.
-# Operationally: find the threshold where TPR > 0.3 and FPR < 0.05
-
-roc_df_rna <- data.frame(
-  threshold = roc_rna$thresholds,
-  TPR       = roc_rna$sensitivities,
-  FPR       = 1 - roc_rna$specificities
-)
-
-jump_threshold <- roc_df_rna %>%
-  filter(FPR < 0.05, TPR > 0.3) %>%
-  slice_max(TPR, n = 1, with_ties = FALSE) %>%
-  pull(threshold)
-
-cat(sprintf("Jump threshold (RNA model): %.3f predicted probability\n", jump_threshold))
-
-# ── 2. Label each HER2+ sample as "obvious" or "hard" ──────
-df_model$prob_rna <- predict(fit_rna, type = "response")
-df_model$prob_dna <- predict(fit_dna, type = "response")
-
-df_model <- df_model %>%
-  mutate(
-    case_type = case_when(
-      y == 0                         ~ "HER2-",
-      prob_rna >= jump_threshold     ~ "Obvious HER2+",
-      TRUE                           ~ "Hard HER2+"
-    )
-  )
-
-cat("\nCase breakdown:\n")
-print(table(df_model$case_type))
-
-# ── 3. What distinguishes obvious from hard cases? ─────────
-p_rna <- ggplot(df_model %>% filter(y == 1),
-                aes(x = case_type, y = rna, fill = case_type)) +
-  geom_violin(alpha = 0.6) +
-  geom_boxplot(width = 0.12, outlier.size = 0.5) +
-  scale_fill_manual(values = c("Obvious HER2+" = "#E64B35", "Hard HER2+" = "#F39B7F")) +
-  labs(title = "ERBB2 mRNA", x = NULL, y = "VST expression") +
-  theme_bw(base_size = 11) + theme(legend.position = "none")
-
-p_dna <- ggplot(df_model %>% filter(y == 1),
-                aes(x = case_type, y = dna, fill = case_type)) +
-  geom_violin(alpha = 0.6) +
-  geom_boxplot(width = 0.12, outlier.size = 0.5) +
-  scale_fill_manual(values = c("Obvious HER2+" = "#4DBBD5", "Hard HER2+" = "#91D1C2")) +
-  labs(title = "ERBB2 CNV (GISTIC2)", x = NULL, y = "GISTIC2 score") +
-  theme_bw(base_size = 11) + theme(legend.position = "none")
-
-# Scatter: RNA vs DNA, coloured by case type (all samples)
-p_scatter <- ggplot(df_model, aes(dna, rna, color = case_type)) +
-  geom_jitter(width = 0.1, size = 2, alpha = 0.7) +
-  scale_color_manual(values = c("HER2-"         = "grey70",
-                                 "Obvious HER2+" = "#E64B35",
-                                 "Hard HER2+"    = "#F39B7F")) +
-  labs(title   = "RNA vs DNA — obvious vs hard HER2+ cases",
-       x = "ERBB2 CNV (GISTIC2)", y = "ERBB2 mRNA (VST)",
-       color = NULL) +
-  theme_bw(base_size = 11)
-
-ggsave(file.path(out_dir, "04_obvious_vs_hard_features.png"),
-       p_rna + p_dna, width = 8, h = 5, dpi = 300, bg = "white")
-ggsave(file.path(out_dir, "05_RNA_vs_DNA_scatter_casetype.png"),
-       p_scatter, width = 7, h = 5, dpi = 300, bg = "white")
-
-# ── 4. Do RNA and DNA agree on which cases are obvious? ────
-# If both modalities flag the same patients as obvious,
-# they're redundant on easy cases. If they disagree, one
-# modality is capturing a distinct subgroup.
-df_model <- df_model %>%
-  mutate(
-    obvious_rna = as.integer(y == 1 & prob_rna >= jump_threshold),
-    obvious_dna = as.integer(y == 1 & prob_dna >= jump_threshold)
-  )
-
-agreement <- df_model %>%
-  filter(y == 1) %>%
-  count(obvious_rna, obvious_dna) %>%
-  mutate(label = paste0(
-    ifelse(obvious_rna, "RNA obvious", "RNA hard"), " / ",
-    ifelse(obvious_dna, "DNA obvious", "DNA hard")
-  ))
-
-cat("\nRNA vs DNA agreement on 'obvious' cases:\n")
-print(agreement)
