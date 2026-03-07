@@ -51,7 +51,7 @@ vst <- readRDS("vst_her2_brca.rds")
 
 # Run the full DESeq2 pipeline
 # (estimateSizeFactors already called in QC script, so safe to re-run)
-# Already assigned design (just her2_clinical), so no need to specify here
+# Already assigned design so no need to specify here
 dds <- DESeq(dds, parallel = FALSE)
 # ── 2. DISPERSION & FIT QC PLOTS ───────────────────────────
 
@@ -145,10 +145,12 @@ anno_col <- as.data.frame(colData(vst)) %>%
 anno_colors <- list(HER2 = c("HER2pos" = "#E64B35", "HER2neg" = "#4DBBD5"),
                     PR = c("Positive" = "#E64B35", 
                             "Negative" = "#4DBBD5",
-                            "Indeterminate" = "#999999"),
+                            "Indeterminate" = "#999999",
+                            "Unknown" = "#999999"),
                     ER = c("Positive" = "#E64B35", 
                             "Negative" = "#4DBBD5",
-                            "Indeterminate" = "#999999"))
+                            "Indeterminate" = "#999999",
+                            "Unknown" = "#999999"))
 
 png(file.path(plot_dir, "05_sample_distance_heatmap.png"),
     width = 1000, height = 900, res = 130)
@@ -384,7 +386,7 @@ ht <- Heatmap(vst_mat,
 )
 
 png(file.path(plot_dir, "11_top_DEG_heatmap.png"),
-    width = 1100, height = 1000, res = 300)
+    width = 2500, height = 1000, res = 300)
 draw(ht)
 dev.off()
 

@@ -60,12 +60,10 @@ mol_df <- data.frame(
 # ═══════════════════════════════════════════════════════════
 # 3. CLINICAL LABELS
 # ═══════════════════════════════════════════════════════════
-# IHC_HER2: "Positive" / "Negative" / "Equivocal" / NA
-# FISH_HER2: "Positive" / "Negative" / NA
-# Build a three-tier label:
-#   HER2+    : IHC Positive  OR  (IHC Equivocal AND FISH Positive)
-#   HER2-    : IHC Negative  OR  (IHC Equivocal AND FISH Negative)
-#   Equivocal: IHC Equivocal AND FISH missing/unavailable
+# FISH-preferential HER2 definition:
+#   Use FISH if available (most reliable)
+#   Fall back to IHC if FISH unavailable
+#   Equivocal only if both are missing/equivocal
 
 mol_df$IHC_HER2  <- meta[meta_ids, "IHC_HER2"]
 mol_df$FISH_HER2 <- meta[meta_ids, "HER2_fish_status"]
@@ -73,14 +71,17 @@ mol_df$FISH_HER2 <- meta[meta_ids, "HER2_fish_status"]
 mol_df <- mol_df %>%
   mutate(
     clinical_label = case_when(
-      IHC_HER2 == "Positive"                                      ~ "HER2+",
-      IHC_HER2 == "Negative"                                      ~ "HER2-",
-      IHC_HER2 == "Equivocal" & FISH_HER2 == "Positive"          ~ "HER2+",
-      IHC_HER2 == "Equivocal" & FISH_HER2 == "Negative"          ~ "HER2-",
-      IHC_HER2 == "Equivocal" & is.na(FISH_HER2)                 ~ "Equivocal",
-      TRUE                                                         ~ NA_character_
+      FISH_HER2 == "Positive"                           ~ "HER2+",
+      FISH_HER2 == "Negative"                           ~ "HER2-",
+      is.na(FISH_HER2) & IHC_HER2 == "Positive"        ~ "HER2+",
+      is.na(FISH_HER2) & IHC_HER2 == "Negative"        ~ "HER2-",
+      is.na(FISH_HER2) & IHC_HER2 == "Equivocal"       ~ "Equivocal",
+      TRUE                                              ~ NA_character_
     ),
-    clinical_label = factor(clinical_label, levels = c("HER2+","HER2-","Equivocal"))
+    clinical_label = factor(
+      clinical_label,
+      levels = c("HER2+", "HER2-", "Equivocal")
+    )
   )
 
 cat("Clinical label breakdown:\n")
@@ -90,7 +91,7 @@ print(table(mol_df$clinical_label, useNA = "ifany"))
 # 4. MOLECULAR CALLS — binarise each layer
 # ═══════════════════════════════════════════════════════════
 # Thresholds are biologically motivated, not data-driven:
-#   CNV >= 1   : gain or amplification (GISTIC2 convention)
+#   CNV = 2   : amplification
 #   mRNA       : top quartile within cohort (overexpression)
 #   Amplicon   : sample's mean z-score across amplicon genes > 1 SD
 
@@ -100,7 +101,7 @@ amplicon_mean_z  <- rowMeans(amplicon_zscore, na.rm = TRUE)
 
 mol_df <- mol_df %>%
   mutate(
-    CNV_positive      = as.integer(!is.na(ERBB2_CNV) & ERBB2_CNV >= 1),
+    CNV_positive      = as.integer(!is.na(ERBB2_CNV) & ERBB2_CNV >= 2),
     mRNA_positive     = as.integer(!is.na(ERBB2_mRNA) & ERBB2_mRNA >= mRNA_threshold),
     amplicon_positive = as.integer(amplicon_mean_z[sample_id] > 1),
     # Multimodal score: sum of positive molecular calls (0–3)
@@ -182,7 +183,7 @@ p_scatter <- ggplot(conc_df,
   scale_colour_manual(values = conc_pal) +
   scale_shape_manual(values = c("HER2+" = 17, "HER2-" = 16, "Equivocal" = 15)) +
   labs(title    = "ERBB2 RNA vs CNV — Clinical/Molecular Concordance",
-       x = "ERBB2 GISTIC2 Score", y = "ERBB2 mRNA (VST)",
+       x = "ERBB2 copy number Score", y = "ERBB2 mRNA (VST)",
        colour = "Concordance", shape = "Clinical label") +
   theme_bw(base_size = 11)
 save_plot(p_scatter, "02_RNA_CNV_concordance_scatter.png", w = 9, h = 6)
@@ -253,8 +254,8 @@ p_violin <- ggplot(mol_df %>% filter(!is.na(GISTIC_tier), !is.na(clinical_label)
   geom_boxplot(width = 0.15, outlier.size = 0.5, position = position_dodge(0.9)) +
   scale_fill_manual(values = c("HER2+" = "#E64B35", "HER2-" = "#4DBBD5",
                                 "Equivocal" = "#F39B7F")) +
-  labs(title = "ERBB2 mRNA by GISTIC2 Tier",
-       x = "GISTIC2 Score", y = "ERBB2 VST Expression", fill = NULL) +
+  labs(title = "ERBB2 mRNA by copy number Tier",
+       x = "copy number Score", y = "ERBB2 VST Expression", fill = NULL) +
   theme_bw(base_size = 11) +
   theme(axis.text.x = element_text(angle = 30, hjust = 1))
 save_plot(p_violin, "04_mRNA_by_GISTIC_tier.png", w = 9, h = 5)

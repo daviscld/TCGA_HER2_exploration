@@ -1,6 +1,6 @@
 # ============================================================
 # RNA vs DNA: which is more predictive of IHC HER2 label?
-# Two univariate logistic regressions, head-to-head ROC comparison
+# Three univariate logistic regressions, head-to-head ROC comparison
 # ============================================================
 # Requires from previous scripts:
 #   meta  – with columns:
@@ -14,6 +14,13 @@ library(dplyr); library(tibble); library(ggplot2);
 library(pROC); library(patchwork)
 
 out_dir <- "rna_vs_dna"; dir.create(out_dir, showWarnings = FALSE)
+
+# Load data
+vst <- readRDS("vst_her2_brca.rds")
+meta <- read.csv("multimodal_results/multimodal_HER2_definition.csv", row.names = 1)
+
+#Make sure they are ordered the same
+vst <- vst[, rownames(meta)]
 
 # ── 1. OUTCOME ─────────────────────────────────────────────
 # Keep only unambiguous Positive / Negative IHC calls
@@ -32,7 +39,7 @@ if (is.na(erbb2_row)) stop("ERBB2 not found in VST matrix rownames")
 
 sample_ids <- rownames(df_outcome)
 df_outcome$rna <- as.numeric(vst_mat[erbb2_row, sample_ids])
-df_outcome$dna <- df_outcome$erbb2_copy_number   
+df_outcome$dna <- df_outcome$ERBB2_CNV
 
 # Drop any samples missing either feature
 df_model <- df_outcome %>%
