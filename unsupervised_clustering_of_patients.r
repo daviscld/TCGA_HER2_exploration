@@ -16,6 +16,7 @@ library(clusterProfiler); library(org.Hs.eg.db); library(msigdbr)
 library(DESeq2)           # re-used for within-cluster DE
 library(EnhancedVolcano)
 library(pheatmap)
+library(XVector)
 
 out_dir <- "clustering_plots";   dir.create(out_dir, showWarnings = FALSE)
 res_dir <- "clustering_results"; dir.create(res_dir, showWarnings = FALSE)
@@ -24,7 +25,8 @@ random_seed  <- 42
 n_hvg        <- 3000     # highly variable genes for UMAP + NMF input
 min_cluster  <- 10       # minimum samples to retain a cluster
 top_de_genes <- 50       # genes shown in DE heatmap
-palette_her2 <- c("HER2+" = "#E64B35", "HER2-" = "#4DBBD5", "Equivocal" = "#F39B7F")
+palette_her2 <- c("HER2+" = "#E64B35", "HER2-" = "#4DBBD5", 
+                "Equivocal" = "#F39B7F")
 
 save_plot <- function(p, fname, w=8, h=6, dpi=300){
   ggsave(file.path(out_dir, fname), p, width=w, height=h, dpi=dpi, bg="white")}
@@ -258,9 +260,6 @@ for (col in categorical_cols) {
   save_plot(p, paste0("04_meta_", make.names(col), "_by_cluster.png"), w=8, h=5)
 }
 
-#clusters seem primarily driven by ER status and PR status
-#i
-
 # ═══════════════════════════════════════════════════════════
 # 4. DE + GSEA: UMAP CLUSTERS
 # ═══════════════════════════════════════════════════════════
@@ -281,8 +280,8 @@ run_de_gsea <- function(vst_counts, sample_meta, cluster_col,
     samp_ab <- sample_meta %>%
       filter(.data[[cluster_col]] %in% c(cl_a, cl_b))
 
-    counts_ab <- round(vst_counts[, samp_ab$sample_id])  # DESeq2 needs integers
-    col_ab    <- samp_ab %>% column_to_rownames("sample_id")
+    counts_ab <- round(vst_counts[, samp_ab$patient_id])  # DESeq2 needs integers
+    col_ab    <- samp_ab %>% column_to_rownames("patient_id")
     col_ab[[cluster_col]] <- factor(col_ab[[cluster_col]], levels = c(cl_b, cl_a))
 
     dds <- DESeqDataSetFromMatrix(counts_ab, col_ab,
@@ -303,13 +302,13 @@ run_de_gsea <- function(vst_counts, sample_meta, cluster_col,
       pull(gene)
 
     if (length(top_genes) >= 5) {
-      mat   <- vst_counts[top_genes, samp_ab$sample_id]
+      mat   <- vst_counts[top_genes, samp_ab$patient_id]
       mat_z <- t(scale(t(mat)))
       mat_z[mat_z >  3] <-  3; mat_z[mat_z < -3] <- -3
 
       ha <- HeatmapAnnotation(
         Cluster = col_ab[[cluster_col]],
-        HER2    = sample_meta$clinical_label[match(samp_ab$sample_id, sample_meta$sample_id)],
+        HER2    = sample_meta$clinical_label[match(samp_ab$patient_id, sample_meta$patient_id)],
         col = list(
           Cluster = setNames(RColorBrewer::brewer.pal(8,"Set2")[seq_along(clusters)], clusters),
           HER2    = palette_her2
@@ -331,7 +330,7 @@ run_de_gsea <- function(vst_counts, sample_meta, cluster_col,
     }
 
     # GSEA with Hallmark gene sets
-    hallmark <- msigdbr(species = "Homo sapiens", category = "H") %>%
+    hallmark <- msigdbr(species = "Homo sapiens", collection = "H") %>%
       dplyr::select(gs_name, gene_symbol)
 
     rank_vec <- res %>%
@@ -367,11 +366,13 @@ run_de_gsea <- function(vst_counts, sample_meta, cluster_col,
 }
 
 # Reload raw counts for DESeq2 (VST is not suitable for DE testing)
+#this will allow for DE testing between UMAP clusters
 dds_full <- readRDS("dds_her2_brca.rds")
-raw_counts <- counts(dds_full)[, assigned$sample_id]
+raw_counts <- counts(dds_full)[, assigned$patient_id]
 
 umap_meta <- umap_df %>% filter(umap_cluster != "Noise")
-umap_de_gsea <- run_de_gsea(raw_counts, umap_meta, "umap_cluster", "UMAP")
+umap_de_gsea <- run_de_gsea(raw_counts, umap_meta, 
+                    "umap_cluster", "UMAP")
 
 # ═══════════════════════════════════════════════════════════
 # 5. NMF
@@ -391,51 +392,51 @@ nmf_survey <- nmf(nmf_mat, rank = 2:8, method = "brunet",
 # v = verbose, p4 = 4 cores; adjust p to your core count or remove for single-core
 
 # Plot rank selection metrics
-png(file.path(out_dir, "05_NMF_rank_survey.png"), width=1000, height=700, res=130)
+png(file.path(out_dir, "05_NMF_rank_survey.png"), 
+        width=4000, height=3000, res=300)
 plot(nmf_survey)
 dev.off()
 
 # Cophenetic + dispersion summary
-coph  <- cophenetic(nmf_survey)
-disp  <- dispersion(nmf_survey)
-rank_df <- data.frame(k = 2:8, cophenetic = coph, dispersion = disp)
+coph <- summary(nmf_survey)["cophenetic"]
+disp <- summary(nmf_survey)["dispersion"]
+rank_df <- data.frame(k = seq(2,8,1), cophenetic = coph, dispersion = disp)
 cat("\nNMF rank survey:\n"); print(rank_df)
 write.csv(rank_df, file.path(res_dir, "NMF_rank_survey.csv"), row.names = FALSE)
 
 # ── 5C. Select optimal rank ───────────────────────────────
 # Choose k where cophenetic is high and starts to decrease,
 # and dispersion is high. The "elbow" in cophenetic is the key signal.
-# Automatically pick the k with the highest cophenetic × dispersion product,
-# but print it so the user can override.
-rank_score <- rank_df$cophenetic * rank_df$dispersion
-best_k     <- rank_df$k[which.max(rank_score)]
-cat(sprintf("\nAuto-selected NMF rank k=%d (cophenetic=%.3f, dispersion=%.3f)\n",
-            best_k, rank_df$cophenetic[rank_df$k==best_k],
-            rank_df$dispersion[rank_df$k==best_k]))
-cat("Override by setting: best_k <- <your chosen k>\n")
+
+#chosen by looking for drop in dispersion, cophenetic, 
+#silhouette score
+best_k <- 4 
 
 # ── 5D. Final NMF run at best_k ───────────────────────────
 cat(sprintf("\nRunning final NMF at k=%d (nrun=100)...\n", best_k))
 set.seed(random_seed)
 nmf_final <- nmf(nmf_mat, rank = best_k, method = "brunet",
                  nrun = 100, seed = random_seed, .opt = "vp4")
+saveRDS(nmf_final, file.path(res_dir, sprintf("NMF_final_k%d.rds", best_k)))
 
 # Assign each sample to its dominant NMF factor (basis component)
 nmf_clusters <- predict(nmf_final, what = "samples")   # named factor vector
 nmf_df <- data.frame(
-  sample_id   = names(nmf_clusters),
-  nmf_cluster = paste0("NMF", as.integer(nmf_clusters))
-) %>% left_join(assigned %>% dplyr::select(sample_id, clinical_label), by = "sample_id")
+  patient_id   = names(nmf_clusters),
+  nmf_cluster = paste0("NMF", as.integer(nmf_clusters))) %>% 
+            left_join(assigned %>% 
+        dplyr::select(patient_id, clinical_label), by = "patient_id")
 
 cat("\nNMF cluster sizes:\n"); print(table(nmf_df$nmf_cluster))
 
 # HER2 enrichment in NMF clusters
 nmf_fisher <- lapply(unique(nmf_df$nmf_cluster), function(cl) {
-  tab <- table(in_cluster = nmf_df$nmf_cluster == cl,
+    tab <- table(in_cluster = nmf_df$nmf_cluster == cl,
                is_her2pos = nmf_df$clinical_label == "HER2+")
-  ft  <- fisher.test(tab)
+    ft  <- fisher.test(tab)
   data.frame(cluster = cl, OR = ft$estimate, p = ft$p.value)
-}) %>% bind_rows() %>% mutate(p_adj = p.adjust(p, method = "BH"))
+}) 
+%>% bind_rows() %>% mutate(p_adj = p.adjust(p, method = "BH"))
 
 cat("\nHER2+ enrichment per NMF cluster (Fisher):\n"); print(nmf_fisher)
 write.csv(nmf_fisher, file.path(res_dir, "NMF_HER2_enrichment.csv"), row.names = FALSE)
@@ -459,12 +460,13 @@ ha_nmf <- HeatmapAnnotation(
   )
 )
 
-nmf_heat_mat <- vst_hvg[all_nmf_genes, nmf_df$sample_id]
+nmf_heat_mat <- vst_hvg[all_nmf_genes, nmf_df$patient_id]
 nmf_heat_z   <- t(scale(t(nmf_heat_mat)))
 nmf_heat_z[nmf_heat_z > 3] <- 3; nmf_heat_z[nmf_heat_z < -3] <- -3
 
 ht_nmf <- Heatmap(nmf_heat_z, name = "Z-score",
-  col               = colorRamp2(c(-3,0,3), c("#4DBBD5","white","#E64B35")),
+  col               = colorRamp2(c(-3,0,3), 
+        c("#4DBBD5","white","#E64B35")),
   top_annotation    = ha_nmf,
   show_column_names = FALSE,
   column_split      = nmf_df$nmf_cluster,
@@ -476,13 +478,19 @@ ht_nmf <- Heatmap(nmf_heat_z, name = "Z-score",
 png(file.path(out_dir, "06_NMF_metagene_heatmap.png"),
     width=1100, height=1000, res=130)
 draw(ht_nmf); dev.off()
+#also make a pdf for use in Illustrator to make final figure panels
+pdf(file.path(out_dir, "06_NMF_metagene_heatmap.pdf"),
+    width=11, height=10)
+draw(ht_nmf); dev.off()
 
 # ── 5F. DE + GSEA between NMF clusters ────────────────────
 nmf_de_gsea <- run_de_gsea(raw_counts, nmf_df, "nmf_cluster", "NMF")
+saveRDS(list(umap_de_gsea = umap_de_gsea, nmf_de_gsea = nmf_de_gsea),
+        file.path(res_dir, "DE_GSEA_results.rds"))
 
 # ── 5G. NMF on UMAP ───────────────────────────────────────
 umap_nmf_df <- umap_df %>%
-  left_join(nmf_df %>% dplyr::select(sample_id, nmf_cluster), by = "sample_id")
+  left_join(nmf_df %>% dplyr::select(patient_id, nmf_cluster), by = "patient_id")
 
 p_umap_nmf <- ggplot(umap_nmf_df, aes(UMAP1, UMAP2, colour = nmf_cluster)) +
   geom_point(size = 1.5, alpha = 0.7) +
@@ -491,73 +499,22 @@ p_umap_nmf <- ggplot(umap_nmf_df, aes(UMAP1, UMAP2, colour = nmf_cluster)) +
   theme_bw(base_size = 12)
 save_plot(p_umap_nmf, "07_UMAP_NMF_overlay.png", w=7, h=6)
 
-# ═══════════════════════════════════════════════════════════
-# 6. COMPARE UMAP vs NMF CLUSTER ASSIGNMENTS
-# ═══════════════════════════════════════════════════════════
-
-# ── 6A. Contingency table + Adjusted Rand Index ───────────
-if (!requireNamespace("mclust", quietly=TRUE)) install.packages("mclust")
-library(mclust)
-
-comparison_df <- umap_df %>%
-  dplyr::select(sample_id, umap_cluster) %>%
-  inner_join(nmf_df %>% dplyr::select(sample_id, nmf_cluster), by = "sample_id") %>%
-  filter(umap_cluster != "Noise")
-
-ari <- adjustedRandIndex(comparison_df$umap_cluster, comparison_df$nmf_cluster)
-cat(sprintf("\nAdjusted Rand Index (UMAP vs NMF clusters): %.3f\n", ari))
-cat("  ARI = 1: perfect agreement  |  ARI = 0: random  |  ARI < 0: worse than random\n")
-
-contingency <- table(UMAP = comparison_df$umap_cluster,
-                     NMF  = comparison_df$nmf_cluster)
-cat("\nContingency table (UMAP rows × NMF cols):\n"); print(contingency)
-write.csv(as.data.frame(contingency),
-          file.path(res_dir, "UMAP_vs_NMF_contingency.csv"), row.names = FALSE)
-
-# ── 6B. Alluvial plot: patient flow between clusterings ───
-if (!requireNamespace("ggalluvial", quietly=TRUE)) install.packages("ggalluvial")
-library(ggalluvial)
-
-alluvial_df <- comparison_df %>%
-  left_join(assigned %>% dplyr::select(sample_id, clinical_label), by = "sample_id") %>%
-  count(umap_cluster, nmf_cluster, clinical_label)
-
-p_alluvial <- ggplot(alluvial_df,
-  aes(axis1 = umap_cluster, axis2 = nmf_cluster, y = n, fill = clinical_label)) +
-  geom_alluvium(alpha = 0.6) +
-  geom_stratum(width = 0.3, fill = "grey90", colour = "grey40") +
-  geom_text(stat = "stratum", aes(label = after_stat(stratum)), size = 3) +
-  scale_fill_manual(values = palette_her2) +
-  scale_x_discrete(limits = c("UMAP Cluster","NMF Cluster"),
-                   expand = c(0.1, 0.1)) +
-  labs(title   = paste0("Patient Flow: UMAP vs NMF  (ARI = ", round(ari, 3), ")"),
-       y = "Samples", fill = "HER2 label") +
-  theme_bw(base_size = 12)
-save_plot(p_alluvial, "08_alluvial_UMAP_vs_NMF.png", w=9, h=7)
-
-# ── 6C. Per-cluster HER2 enrichment side-by-side ──────────
-her2_both <- bind_rows(
-  her2_fisher %>% mutate(Method = "UMAP/HDBSCAN"),
-  nmf_fisher  %>% mutate(Method = "NMF")
-)
-
-p_enrich_compare <- ggplot(her2_both,
-  aes(x = cluster, y = log2(OR + 0.01),
-      fill = p_adj < 0.05, alpha = Method)) +
-  geom_col(position = "dodge", width = 0.7) +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  scale_fill_manual(values = c("TRUE"="#E64B35","FALSE"="grey70"),
-                    labels = c("TRUE"="FDR<0.05","FALSE"="NS")) +
-  scale_alpha_manual(values = c("UMAP/HDBSCAN"=1, "NMF"=0.6)) +
-  facet_wrap(~Method, scales = "free_x") +
-  labs(title = "HER2+ Enrichment Odds Ratio by Cluster",
-       x = "Cluster", y = "log2(Odds Ratio)", fill = NULL) +
-  theme_bw(base_size = 11)
-save_plot(p_enrich_compare, "09_HER2_enrichment_UMAP_vs_NMF.png", w=10, h=5)
-
-# ── 6D. Save master assignment table ──────────────────────
-master_df <- comparison_df %>%
-  left_join(assigned %>% dplyr::select(sample_id, clinical_label), by = "sample_id")
-write.csv(master_df, file.path(res_dir, "master_cluster_assignments.csv"), row.names = FALSE)
-
-cat(sprintf("\n✓ Plots → %s\n✓ Tables → %s\n", out_dir, res_dir))
+# Plot GSEA results for NMF clusters
+plt <- lapply(names(nmf_de_gsea$gsea), function(tag) {
+  gsea_res <- nmf_de_gsea$gsea[[tag]]
+  if (!is.null(gsea_res) && nrow(as.data.frame(gsea_res)) > 0) {
+    p <- dotplot(gsea_res, showCategory = 20, split = ".sign",
+                 font.size = 8) +
+      facet_grid(~.sign) +
+      labs(title = paste("NMF GSEA Hallmark —", tag)) +
+      theme_bw(base_size = 9)
+    save_plot(p, paste0("08_NMF_GSEA_", tag, ".png"), w=12, h=8)
+    return(p)
+  } else {
+    return(NULL)
+  }
+}) %>% compact() %>% wrap_plots(ncol = 2)
+save_plot(plt, "08_NMF_GSEA_all.png", w=14, h=14)
+#save as pdf for figure creation
+pdf(file.path(out_dir, "08_NMF_GSEA_all.pdf"), width=14, height=14)
+print(plt); dev.off()
