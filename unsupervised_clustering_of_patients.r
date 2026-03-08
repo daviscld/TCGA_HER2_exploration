@@ -41,11 +41,10 @@ meta    <- read.csv("metadata_qc_passed.csv", row.names = 1)
 vst     <- readRDS("vst_her2_brca.rds")
 vst_mat <- assay(vst)
 
-# Use mol_df if available; otherwise rebuild clinical_label from meta
+# rebuild clinical_label from meta
 
-if (!exists("mol_df")) {
-  meta_ids <- if ("patient_id" %in% colnames(meta)) meta$patient_id else rownames(meta)
-  meta$FISH_HER2 <- meta[meta_ids, "HER2_fish_status"]
+meta_ids <- if ("patient_id" %in% colnames(meta)) meta$patient_id else rownames(meta)
+meta$FISH_HER2 <- meta[meta_ids, "HER2_fish_status"]
 mol_df <- meta %>%
   mutate(
     clinical_label = case_when(
@@ -61,7 +60,7 @@ mol_df <- meta %>%
       levels = c("HER2+", "HER2-", "Equivocal")
     )
   )
-}
+
 
 #if ER and PR status are available, rename them to similar to HER2
 if ("PR_status_by_ihc" %in% colnames(meta)) {
@@ -241,6 +240,8 @@ for (col in continuous_cols) {
   p <- ggplot(meta_sub %>% filter(!is.na(.data[[col]])),
               aes(x = umap_cluster, y = .data[[col]], fill = umap_cluster)) +
     geom_violin(alpha = 0.6) + geom_boxplot(width = 0.12, outlier.size = 0.4) +
+    stat_compare_means(method = "wilcox.test", 
+            label.y = max(meta_sub[[col]], na.rm = TRUE) * 1.05) +
     scale_fill_brewer(palette = "Set2") +
     labs(title = paste(col, "by UMAP cluster"), x = NULL, y = col) +
     theme_bw(base_size = 11) + theme(legend.position = "none")
@@ -254,6 +255,7 @@ for (col in categorical_cols) {
     group_by(umap_cluster) %>% mutate(pct = 100 * n / sum(n)) %>%
     ggplot(aes(x = umap_cluster, y = pct, fill = .data[[col]])) +
     geom_col(width = 0.7) +
+    stat_compare_means(method = "chisq.test", label.y = 75) +
     labs(title = paste(col, "composition by UMAP cluster"),
          x = NULL, y = "%", fill = col) +
     theme_bw(base_size = 11)
@@ -261,8 +263,9 @@ for (col in categorical_cols) {
 }
 
 # ═══════════════════════════════════════════════════════════
-# 4. DE + GSEA: UMAP CLUSTERS
+# 4. DE + GSEA
 # ═══════════════════════════════════════════════════════════
+#define a function to run GSEA for clusters
 run_de_gsea <- function(vst_counts, sample_meta, cluster_col,
                         prefix, top_n = top_de_genes) {
 
@@ -308,9 +311,13 @@ run_de_gsea <- function(vst_counts, sample_meta, cluster_col,
 
       ha <- HeatmapAnnotation(
         Cluster = col_ab[[cluster_col]],
+        ER_label = sample_meta$ER_label[match(samp_ab$patient_id, sample_meta$patient_id)],
+        PR_label = sample_meta$PR_label[match(samp_ab$patient_id, sample_meta$patient_id)],
         HER2    = sample_meta$clinical_label[match(samp_ab$patient_id, sample_meta$patient_id)],
         col = list(
           Cluster = setNames(RColorBrewer::brewer.pal(8,"Set2")[seq_along(clusters)], clusters),
+            ER_label = palette_er,
+            PR_label = palette_pr,
           HER2    = palette_her2
         )
       )
@@ -425,7 +432,8 @@ nmf_df <- data.frame(
   patient_id   = names(nmf_clusters),
   nmf_cluster = paste0("NMF", as.integer(nmf_clusters))) %>% 
             left_join(assigned %>% 
-        dplyr::select(patient_id, clinical_label), by = "patient_id")
+        dplyr::select(patient_id, clinical_label, ER_label, PR_label), 
+        by = "patient_id")
 
 cat("\nNMF cluster sizes:\n"); print(table(nmf_df$nmf_cluster))
 
@@ -452,11 +460,15 @@ all_nmf_genes <- unique(as.vector(top_genes_nmf))
 ha_nmf <- HeatmapAnnotation(
   NMF_cluster = nmf_df$nmf_cluster,
   HER2        = nmf_df$clinical_label,
+  PR_label    = nmf_df$PR_label,
+  ER_label    = nmf_df$ER_label,
   col = list(
     NMF_cluster = setNames(
       RColorBrewer::brewer.pal(max(best_k, 3), "Set1")[1:best_k],
       paste0("NMF", 1:best_k)),
-    HER2 = palette_her2
+    HER2 = palette_her2,
+    PR_label = palette_pr,
+    ER_label = palette_er
   )
 )
 
@@ -476,7 +488,7 @@ ht_nmf <- Heatmap(nmf_heat_z, name = "Z-score",
   heatmap_legend_param = list(title = "Z-score")
 )
 png(file.path(out_dir, "06_NMF_metagene_heatmap.png"),
-    width=1100, height=1000, res=130)
+    width=1100, height=1000, res=300)
 draw(ht_nmf); dev.off()
 #also make a pdf for use in Illustrator to make final figure panels
 pdf(file.path(out_dir, "06_NMF_metagene_heatmap.pdf"),
