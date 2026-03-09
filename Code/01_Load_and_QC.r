@@ -1,8 +1,7 @@
 library(tidyverse)
 
 # Read all CSV files from the specified directory
-data_dir <- "/Users/christinedavis/Documents/Professional/Post PhD Job Application/Tempus_Pharma_RD_Coding_Challenge_data.v2026.1"
-
+data_dir <- Sys.getenv("TCGA_DATA_DIR", unset = "Data")
 files <- list.files(data_dir, pattern = "\\.csv$", full.names = TRUE)
 
 # Read each CSV file
