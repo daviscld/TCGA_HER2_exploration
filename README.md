@@ -11,12 +11,19 @@ Additional plots and tables not included in the written report are included here
 ## Repository structure
 
 Scripts are intended to be run sequentially:
+
 01_Load_and_QC.r
+
 02_DEG_analysis_of_HER2clinical.r
+
 03_HER2_clinical_multimodal_definitions.r
+
 04_rna_vs_dna.r
+
 05_unsupervised_clustering_UMAP_NMF.r
+
 06_cluster_scoring_by_signatures.r
+
 07_sPLSDA_and_rf.r
 
 ---
